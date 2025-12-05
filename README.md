@@ -68,3 +68,39 @@ Ligne correspondante dans le netlist:
 ```spice
 Vin in 0 AC 1
 
+
+
+Question 3 – Mesure de la fréquence de coupure avec .meas
+
+Objectif
+Automatiser le calcul de la fréquence de coupure directement dans ngspice.
+
+Principe
+Pour une source AC de 1 V, le gain en décibels vaut:
+
+gain_dB = vdb(out)
+
+La fréquence de coupure correspond au point où le gain vaut −3 dB.
+La directive .meas suivante retourne la fréquence recherchée:
+
+.meas ac f_cutoff WHEN vdb(out) = -3
+
+Explication des mots clés
+
+.meas ac : demande une mesure sur l’analyse AC.
+
+f_cutoff : nom du résultat qui apparaîtra dans la console ngspice.
+
+WHEN vdb(out) = -3 : ngspice recherche la fréquence pour laquelle vdb(out) atteint −3 dB en interpolant entre les points du sweep AC.
+
+Utilisation
+
+Lancer ngspice sur le fichier:
+
+ngspice rc_filter.cir
+
+À la fin de l’analyse, ngspice affiche une ligne du type:
+
+f_cutoff = 1.59e+03
+
+Cette fréquence se compare ensuite à la valeur théorique 1,6 kHz obtenue à la question 1.
