@@ -49,3 +49,22 @@ fc ≈ 1.59e3 Hz
 
 Fréquence de coupure théorique du filtre:
 fc ≈ 1.6 kHz.
+
+
+
+
+
+## Question 2 – Source de tension et simulation AC
+
+Objectif  
+Ajouter une source de tension sur l’entrée du filtre et configurer une simulation AC pour pouvoir extraire la fréquence de coupure.
+
+Choix de la source  
+On utilise une source de tension linéaire Vin entre le nœud `in` et la masse, avec une amplitude AC de 1 V.  
+En SPICE, le mot-clé `AC` définit l’amplitude pour l’analyse fréquentielle petit signal.
+
+Ligne correspondante dans le netlist:
+
+```spice
+Vin in 0 AC 1
+

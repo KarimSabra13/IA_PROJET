@@ -1,17 +1,19 @@
 * RC low-pass filter, first order
 
+* Parametres
 .param Rval = 1k
 .param Cval = 100n
 
-* Input source, AC amplitude 1 V
+* Source de tension d'entree, analyse AC petit signal (amplitude 1 V)
 Vin in 0 AC 1
 
-* R in series, C to ground
+* Filtre RC: R en serie, C a la masse
 R1 in out {Rval}
 C1 out 0 {Cval}
 
-* AC sweep from 10 Hz to 1 MHz
+* Balayage AC log: 10 Hz a 1 MHz, 100 points par decennie
 .ac dec 100 10 1Meg
 
+* On utilisera V(out) pour extraire la frequence de coupure (-3 dB)
 .end
 
