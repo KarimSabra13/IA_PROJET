@@ -344,3 +344,192 @@ git commit -m "Update README with project structure and questions 1–5"
 git push
 ````
 
+
+
+
+
+Voici quoi ajouter dans ton README, puis les commandes git à la fin.
+
+---
+
+## Environnement Python, uv et pyngs
+
+Le projet utilise `uv` pour gérer l’environnement Python et les dépendances.
+
+Version de Python  
+Au départ, le projet était configuré avec:
+
+```toml
+requires-python = ">=3.13"
+````
+
+et uv utilisait Python 3.13.9.
+Avec cette configuration, l’appel au module `pyngs.core` provoquait une erreur fatale à la fin de l’exécution de Python:
+
+```text
+Fatal Python error: _PyThreadState_Attach: non-NULL old thread state
+Python runtime state: initialized
+Extension modules: ..., pyngs.core
+```
+
+Cette erreur ne vient pas du code Python, mais d’un problème de compatibilité entre la version 3.13 de Python et le module natif `pyngs.core`.
+
+Pour stabiliser l’environnement, le projet a été basculé sur Python 3.12, de la façon suivante:
+
+1. Modifier `pyproject.toml` pour autoriser Python 3.12:
+
+```toml
+requires-python = ">=3.12,<3.13"
+```
+
+2. Installer et pinner Python 3.12 avec uv:
+
+```bash
+uv python install 3.12
+uv python pin 3.12
+```
+
+3. Recréer l’environnement virtuel et resynchroniser les dépendances:
+
+```bash
+rm -rf .venv
+uv sync
+```
+
+4. Vérifier la version utilisée par uv:
+
+```bash
+uv run python -c "import sys; print(sys.version)"
+# → 3.12.x
+```
+
+Installation de pyngs
+Pour être cohérent avec cette version de Python, on installe le wheel `cp312` de pyngs:
+
+```bash
+uv pip install deps/pyngs-0.0.2-cp312-cp312-linux_x86_64.whl
+```
+
+uv met à jour `pyproject.toml` et `uv.lock` et installe `pyngs` dans l’environnement virtuel `.venv`.
+
+Avec cette configuration:
+
+* les appels à `pyngs.core.NGSpiceInstance` fonctionnent correctement,
+* la mesure `fcut` est récupérée sans erreur,
+* l’erreur fatale `_PyThreadState_Attach` ne se reproduit plus.
+
+Remarque
+Ce choix de rester sur Python 3.12 est cohérent avec le contexte du TP, où `pyngs` est fourni sous forme de wheel précompilé pour cette version.
+
+````
+
+Et pour documenter les pools, tu peux ajouter ceci dans la suite du README (par exemple après la question 5).
+
+```markdown
+## Question 6 – Environnement de simulation en Python (SequentialPool et ParallelPool)
+
+Objectif  
+Créer un environnement de simulation générique capable de lancer automatiquement des simulations ngspice pour une liste de paramètres, avec deux modes:
+
+- un mode séquentiel (`SequentialPool`) qui exécute les simulations une par une,
+- un mode parallèle (`ParallelPool`) qui utilise plusieurs processus.
+
+Interface commune  
+Les deux classes dérivent d’une classe de base `BasePool` définie dans `main/pools.py`.  
+Cette classe stocke:
+
+- la liste des netlists SPICE à utiliser,
+- le nom de la mesure SPICE à récupérer (par exemple `fcut`).
+
+L’interface attendue est:
+
+```python
+pool = SequentialPool(["spice/rc_filter.cir"], measure_name="fcut")
+result = pool.run(values)
+````
+
+où `values` est une `pandas.DataFrame` dont les colonnes correspondent aux paramètres SPICE (ici `R_val` et `C_val`).
+
+### SequentialPool
+
+`SequentialPool` crée une instance de `NGSpiceInstance` par netlist et charge les netlists une seule fois au constructeur.
+La méthode interne `_simulate_one`:
+
+* reçoit un dictionnaire `{"R_val": ..., "C_val": ...}`,
+* met à jour les paramètres dans ngspice avec `set_parameter`,
+* lance la simulation avec `run`,
+* lit la mesure demandée avec `get_measure(measure_name)`.
+
+La méthode `run(values)`:
+
+1. Parcourt les lignes de la DataFrame `values`.
+2. Pour chaque ligne, construit un dictionnaire `{nom_param: valeur}`.
+3. Choisit une instance ngspice (round robin si plusieurs netlists).
+4. Appelle `_simulate_one` et stocke la mesure dans une liste.
+5. À la fin, appelle `stop()` sur toutes les instances pour arrêter proprement ngspice.
+6. Renvoie une `DataFrame` avec une colonne `fcut` contenant toutes les mesures.
+
+Ce mode est simple et suffisant pour un volume modéré de simulations.
+
+### ParallelPool
+
+`ParallelPool` utilise le module `multiprocessing` pour exécuter plusieurs simulations en parallèle.
+Chaque simulation est traitée par un processus fils qui:
+
+* crée sa propre `NGSpiceInstance`,
+* charge la netlist,
+* applique les paramètres,
+* lance la simulation,
+* renvoie la mesure `fcut`,
+* puis appelle `inst.stop()`.
+
+L’implémentation:
+
+1. Transforme chaque ligne de `values` en une tâche du type
+   `(chemin_netlist, measure_name, params, index)`.
+2. Associe les tâches aux netlists de manière round robin.
+3. Utilise un `multiprocessing.Pool` avec un nombre de processus égal au minimum entre le nombre de netlists et le nombre de cœurs CPU.
+4. Applique la fonction `_worker_task` à toutes les tâches.
+5. Récupère les couples `(index, valeur)`, trie par `index` pour retrouver l’ordre d’origine, et construit une DataFrame avec la colonne `fcut`.
+
+Ce mode permet de réduire le temps total pour de grandes listes de paramètres, au prix d’une complexité un peu plus élevée.
+
+### Utilisation via `create_pool` et `main.py`
+
+Pour simplifier l’utilisation dans le script principal, une fonction utilitaire `create_pool` est définie dans `main/pools.py`:
+
+```python
+from main.pools import create_pool
+
+pool = create_pool("sequential", ["spice/rc_filter.cir"], measure_name="fcut")
+# ou bien
+# pool = create_pool("parallel", ["spice/rc_filter.cir"], measure_name="fcut")
+```
+
+Dans `main.py`:
+
+1. On construit la DataFrame `values` avec les colonnes `R_val` et `C_val`.
+2. On choisit le mode `"sequential"` ou `"parallel"`.
+3. On crée le pool avec `create_pool(...)`.
+4. On appelle `pool.run(values)` pour obtenir une DataFrame des fréquences de coupure `fcut`.
+5. On affiche les résultats.
+
+Les valeurs obtenues sont très proches de la fréquence de coupure théorique `fc = 1 / (2π R C)`, ce qui valide à la fois:
+
+* le filtre RC et la mesure `.meas ac fcut WHEN vdb(out) = -3` dans ngspice,
+* l’intégration de ngspice via `pyngs`,
+* et la logique de l’environnement de simulation en Python (séquentiel et parallèle).
+
+````
+
+---
+
+### 2) Commit + push pour ce checkpoint
+
+Sans blabla:
+
+```bash
+git add README.md pyproject.toml uv.lock
+git commit -m "Document Python 3.12 environment, pyngs setup and simulation pools"
+git push
+````
