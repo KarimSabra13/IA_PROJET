@@ -16,3 +16,7 @@ __pycache__/
 # Editors
 .vscode/
 .idea/
+# Wheels / archives locales
+deps/*.whl
+deps/*.tar.gz
+deps/*:Zone.Identifier

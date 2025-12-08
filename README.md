@@ -104,3 +104,41 @@ ngspice rc_filter.cir
 f_cutoff = 1.59e+03
 
 Cette fréquence se compare ensuite à la valeur théorique 1,6 kHz obtenue à la question 1.
+
+
+Question 4 – Exécution de ngspice et validation de la fréquence de coupure
+
+Objectif
+Exécuter le fichier rc_filter.cir dans ngspice et vérifier que la mesure .meas donne une fréquence de coupure proche de la valeur théorique.
+
+Procédure (mode interactif)
+Dans le terminal, depuis le dossier du projet :
+
+ngspice rc_filter.cir
+
+Ngspice charge le netlist et affiche un prompt :
+
+ngspice 1 ->
+
+On lance alors la simulation AC avec :
+
+run
+
+À la fin de la simulation, ngspice exécute la directive .meas :
+
+.meas ac f_cutoff WHEN vdb(out) = -3
+
+et affiche une ligne du type :
+
+f_cutoff = 1.590e+03
+
+Comparaison avec la théorie
+La fréquence de coupure théorique calculée à la question 1 est :
+
+fc_th ≈ 1.59e3 Hz
+
+La valeur mesurée par ngspice est :
+
+fc_meas ≈ 1.59e3 Hz
+
+Les deux valeurs sont presque identiques, ce qui confirme que le netlist, la source de tension, la simulation AC et la mesure .meas sont corrects.

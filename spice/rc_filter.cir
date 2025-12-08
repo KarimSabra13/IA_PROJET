@@ -1,0 +1,22 @@
+* RC low-pass filter, first order
+
+* Parametres
+.param Rval = 1k
+.param Cval = 100n
+
+* Source de tension d'entree, analyse AC petit signal (amplitude 1 V)
+Vin in 0 AC 1
+
+* Filtre RC: R en serie, C a la masse
+R1 in out {Rval}
+C1 out 0 {Cval}
+
+* Balayage AC log: 10 Hz a 1 MHz, 100 points par decennie
+.ac dec 100 10 1Meg
+
+* Mesure automatique de la frequence de coupure
+* vdb(out) = 20*log10(|V(out)|)
+* La coupure correspond a -3 dB
+.meas ac f_cutoff WHEN vdb(out) = -3
+
+.end
