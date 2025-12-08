@@ -5,7 +5,7 @@
 .param Cval = 100n
 
 * Source de tension d'entree, analyse AC petit signal (amplitude 1 V)
-Vin in 0 AC 1
+Vin in 0 0 AC 1
 
 * Filtre RC: R en serie, C a la masse
 R1 in out {Rval}
