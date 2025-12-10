@@ -1,0 +1,48 @@
+* CMOS inverter full characterization - SKY130 / Ciel
+
+***************  PDK + options  ***************
+.lib "/home/karim/IA_PROJET/pdk_local/ciel/sky130/versions/3c1a32a2e05bfbe3311ed348e60435f0a3468ef0/sky130A/libs.tech/ngspice/tt.lib.spice" tt
+
+.option method = trap
+.option reltol = 1e-3 abstol = 1e-12 vntol = 1e-6
+
+***************  Paramètres de l’inverseur  ***************
+.param vdd = 1.8
+* ATTENTION : les modèles SKY130 utilisent scale=1e-6
+* => L, W en microns (sans suffixe u)
+.param lch = 0.15
+.param wn  = 0.42
+.param wp  = 0.84
+
+***************  Subckt inverseur CMOS  ***************
+* Ports : in, out, vdd, vss
+.subckt inv in out vdd vss
+XMN out in vss vss sky130_fd_pr__nfet_01v8 L={lch} W={wn}
+XMP out in vdd vdd sky130_fd_pr__pfet_01v8 L={lch} W={wp}
+.ends inv
+
+***************  Excitation  ***************
+VDD vdd 0 {vdd}
+* PULSE(V1 V2 TD TR TF PW PER)
+VIN in 0 PULSE(0 {vdd} 0.5n 50p 50p 5n 20n)
+
+***************  Instanciation de l’inverseur  ***************
+XINV in out vdd 0 inv
+
+***************  Simulation temporelle  ***************
+.tran 1p 40n
+
+***************  Mesures de délai  ***************
+* VDD = 1.8 V => 50 % = 0.9 V
+.meas tran tphl  trig v(in)  val=0.9 rise=1 targ v(out) val=0.9 fall=1
+.meas tran tplh  trig v(in)  val=0.9 fall=1 targ v(out) val=0.9 rise=1
+.meas tran tpavg param='(tphl + tplh)/2'
+
+***************  Mesures de fuite / puissance statique  ***************
+* On mesure la fuite après les transitions, quand tout est stabilisé
+* Fenêtre 30 ns -> 40 ns
+.meas tran ileak   AVG I(VDD) FROM=30n TO=40n
+.meas tran pstatic PARAM='-vdd*ileak'
+
+.end
+

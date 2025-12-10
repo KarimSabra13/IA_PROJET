@@ -1,0 +1,48 @@
+* CMOS inverter delay characterization - SKY130 / Ciel
+
+***************  PDK + options  ***************
+* PDK installé via Ciel dans le projet
+
+.lib "/home/karim/IA_PROJET/pdk_local/ciel/sky130/versions/3c1a32a2e05bfbe3311ed348e60435f0a3468ef0/sky130A/libs.tech/ngspice/tt.lib.spice" tt
+
+.option method = trap
+.option reltol = 1e-3 abstol = 1e-9 vntol = 1e-6
+
+***************  Paramètres de l’inverseur  ***************
+.param vdd = 1.8
+* ATTENTION : les modèles SKY130 ont déjà scale=1e-6
+* => L, W en microns (SANS suffixe u)
+.param lch = 0.15
+.param wn  = 0.42
+.param wp  = 0.84
+
+***************  Subckt inverseur CMOS  ***************
+* Ports : in, out, vdd, vss
+.subckt inv in out vdd vss
+* NMOS : drain=out, gate=in, source=vss, bulk=vss
+XMN out in vss vss sky130_fd_pr__nfet_01v8 L={lch} W={wn}
+* PMOS : drain=out, gate=in, source=vdd, bulk=vdd
+XMP out in vdd vdd sky130_fd_pr__pfet_01v8 L={lch} W={wp}
+.ends inv
+
+***************  Excitation  ***************
+VDD vdd 0 {vdd}
+
+* PULSE(V1 V2 TD TR TF PW PER)
+VIN in 0 PULSE(0 {vdd} 0.5n 50p 50p 5n 10n)
+
+***************  Instanciation de l’inverseur  ***************
+XINV in out vdd 0 inv
+
+***************  Simulation temporelle  ***************
+.tran 1p 20n
+
+***************  Mesures de délai  ***************
+* VDD = 1.8 V => 50 % = 0.9 V
+.meas tran tpHL  trig v(in)  val=0.9 rise=1 targ v(out) val=0.9 fall=1
+
+.meas tran tpLH  trig v(in)  val=0.9 fall=1 targ v(out) val=0.9 rise=1
+
+.meas tran tpavg param='(tpHL + tpLH)/2'
+
+.end

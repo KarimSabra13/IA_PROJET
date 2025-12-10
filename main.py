@@ -1,31 +1,36 @@
 from __future__ import annotations
 
-from main.rc_analysis import sweep_cutoff
-import sys
 import os
+import sys
+
+import pandas as pd
+
+from main.pools import create_pool
 
 
 def main() -> None:
-    rc_values = [
-        (1_000, 100e-9),
-        (2_000, 100e-9),
-        (1_000, 220e-9),
-        (4_700, 47e-9),
-    ]
+    # Jeux de valeurs comme dans l'énoncé
+    values = pd.DataFrame({
+        "R_val": [10, 100, 1000, 10000, 10, 100, 1000, 10000],
+        "C_val": [1e-6, 1e-6, 1e-6, 1e-6, 2e-6, 2e-6, 2e-6, 2e-6],
+    })
 
-    results = sweep_cutoff(rc_values)
+    # Choix du mode de simulation
+    # "sequential" pour SequentialPool
+    # "parallel" pour ParallelPool
+    mode = "sequential"
 
-    print("R (ohm) C (F)           f_th (Hz)               f_meas (Hz)")
-    for row in results:
-        print(
-            f"{int(row['R']):<7d}"
-            f"{row['C']:<12.2e}"
-            f"{row['f_theoretical']:>10.2f} "
-            f"{row['f_measured']:>10.2f}"
-        )
+    # Création du pool adapté
+    pool = create_pool(mode, ["spice/rc_filter.cir"], measure_name="fcut")
 
-    # On flush la sortie, puis on coupe le process pour éviter
-    # le bug de finalisation (_PyThreadState_Attach)
+    # Lancement des simulations
+    result = pool.run(values)
+
+    # Affichage des résultats
+    print(result)
+
+    # On vide la sortie standard, puis on coupe le process tout de suite
+    # pour éviter le crash de pyngs à la fermeture de l'interpréteur.
     sys.stdout.flush()
     os._exit(0)
 
