@@ -1,38 +1,41 @@
-````markdown
 # TP – Filtre RC, ngspice et pyngs
 
 ## Structure du projet
 
 Le projet est organisé comme suit:
 
-- `spice/` : netlists ngspice  
-  - `spice/rc_filter.cir` : filtre RC du premier ordre avec mesure de la fréquence de coupure
-- `main/` : code Python réutilisable  
-  - `main/rc_analysis.py` : fonctions pour lancer ngspice via pyngs et récupérer la fréquence de coupure
-- `main.py` : script principal qui appelle les fonctions de `main/rc_analysis.py`
-- `deps/` : fichiers wheel fournis pour pyngs  
-  - `deps/pyngs-0.0.2-cp313-cp313-linux_x86_64.whl`
-- `results/` : répertoire prévu pour logs, CSV, figures
-- `pyproject.toml`, `uv.lock` : configuration du projet uv et dépendances
+* `spice/` : netlists ngspice
+
+  * `spice/rc_filter.cir` : filtre RC du premier ordre avec mesure de la fréquence de coupure
+* `main/` : code Python réutilisable
+
+  * `main/rc_analysis.py` : fonctions pour lancer ngspice via pyngs et récupérer la fréquence de coupure
+  * `main/pools.py` : infrastructure de simulation séquentielle et parallèle autour de pyngs
+* `main.py` : script principal qui appelle les fonctions de `main/rc_analysis.py` (et éventuellement les pools)
+* `deps/` : fichiers wheel fournis pour pyngs
+
+  * `deps/pyngs-0.0.2-cp312-cp312-linux_x86_64.whl`
+* `results/` : répertoire prévu pour logs, CSV, figures
+* `pyproject.toml`, `uv.lock` : configuration du projet uv et dépendances
 
 ---
 
 ## Question 1 – Filtre RC du premier ordre
 
-Objectif  
+Objectif
 Décrire un filtre RC du premier ordre en SPICE, avec des paramètres pour R et C, puis calculer la fréquence de coupure théorique.
 
-Description du circuit  
+Description du circuit
 On modélise un filtre RC passe-bas:
 
-- Source Vin appliquée sur une résistance R.
-- Un condensateur C entre la sortie et la masse.
-- La sortie se trouve entre R et C.
+* Source Vin appliquée sur une résistance R
+* Un condensateur C entre la sortie et la masse
+* La sortie se trouve entre R et C
 
 Le netlist SPICE utilise des paramètres pour R et C:
 
-- `Rval` = valeur de la résistance
-- `Cval` = valeur de la capacité
+* `Rval` = valeur de la résistance
+* `Cval` = valeur de la capacité
 
 Netlist de base (contenu de `spice/rc_filter.cir`):
 
@@ -49,7 +52,7 @@ C1 out 0 {Cval}
 .ac dec 100 10 1Meg
 
 .end
-````
+```
 
 Fréquence de coupure théorique
 
@@ -115,7 +118,7 @@ Interprétation
 
 * À basse fréquence, le condensateur se comporte comme un circuit ouvert, le gain en sortie vaut environ 1 (0 dB).
 * Quand la fréquence augmente, la tension de sortie diminue.
-* La fréquence de coupure est la fréquence pour laquelle le gain est tombé à `1 / sqrt(2)` de la valeur basse fréquence, soit environ −3 dB.
+* La fréquence de coupure est la fréquence pour laquelle le gain vaut `1 / sqrt(2)` de la valeur basse fréquence, soit environ −3 dB.
 * La simulation AC permet de visualiser `V(out)` en fonction de la fréquence et de comparer ensuite la fréquence de coupure mesurée à la valeur théorique calculée à la question 1.
 
 ---
@@ -142,9 +145,9 @@ La directive `.meas` utilisée dans `spice/rc_filter.cir` est:
 
 Explication des mots clés:
 
-* `.meas ac` : demande une mesure sur l’analyse AC.
-* `f_cutoff` : nom du résultat qui apparaîtra dans la sortie de ngspice.
-* `WHEN vdb(out) = -3` : ngspice recherche la fréquence pour laquelle `vdb(out)` atteint −3 dB en interpolant entre les points du sweep AC.
+* `.meas ac` : demande une mesure sur l’analyse AC
+* `f_cutoff` : nom du résultat qui apparaîtra dans la sortie de ngspice
+* `WHEN vdb(out) = -3` : ngspice recherche la fréquence pour laquelle `vdb(out)` atteint −3 dB en interpolant entre les points du sweep AC
 
 Utilisation
 
@@ -185,7 +188,7 @@ ngspice 1 ->
 
 On lance alors la simulation AC avec:
 
-```text
+```bash
 run
 ```
 
@@ -229,7 +232,7 @@ Installation de pyngs
 Le wheel fourni est placé dans le dossier `deps/` puis installé avec uv:
 
 ```bash
-uv pip install deps/pyngs-0.0.2-cp313-cp313-linux_x86_64.whl
+uv pip install deps/pyngs-0.0.2-cp312-cp312-linux_x86_64.whl
 ```
 
 uv met automatiquement à jour `pyproject.toml` et `uv.lock`.
@@ -286,6 +289,7 @@ def sweep_cutoff(rc_values: Iterable[Tuple[float, float]]) -> list[Dict[str, Any
             }
         )
 
+    inst.stop()
     return results
 ```
 
@@ -334,34 +338,19 @@ Le programme affiche pour chaque couple `(R, C)`:
 
 Les valeurs mesurées sont très proches des valeurs théoriques, ce qui valide le filtre RC, la mesure `.meas` et l’intégration Python via pyngs.
 
-````
-
-Ensuite:
-
-```bash
-git add README.md
-git commit -m "Update README with project structure and questions 1–5"
-git push
-````
-
-
-
-
-
-Voici quoi ajouter dans ton README, puis les commandes git à la fin.
-
 ---
 
 ## Environnement Python, uv et pyngs
 
 Le projet utilise `uv` pour gérer l’environnement Python et les dépendances.
 
-Version de Python  
+### Version de Python
+
 Au départ, le projet était configuré avec:
 
 ```toml
 requires-python = ">=3.13"
-````
+```
 
 et uv utilisait Python 3.13.9.
 Avec cette configuration, l’appel au module `pyngs.core` provoquait une erreur fatale à la fin de l’exécution de Python:
@@ -378,32 +367,33 @@ Pour stabiliser l’environnement, le projet a été basculé sur Python 3.12, d
 
 1. Modifier `pyproject.toml` pour autoriser Python 3.12:
 
-```toml
-requires-python = ">=3.12,<3.13"
-```
+   ```toml
+   requires-python = ">=3.12,<3.13"
+   ```
 
 2. Installer et pinner Python 3.12 avec uv:
 
-```bash
-uv python install 3.12
-uv python pin 3.12
-```
+   ```bash
+   uv python install 3.12
+   uv python pin 3.12
+   ```
 
 3. Recréer l’environnement virtuel et resynchroniser les dépendances:
 
-```bash
-rm -rf .venv
-uv sync
-```
+   ```bash
+   rm -rf .venv
+   uv sync
+   ```
 
 4. Vérifier la version utilisée par uv:
 
-```bash
-uv run python -c "import sys; print(sys.version)"
-# → 3.12.x
-```
+   ```bash
+   uv run python -c "import sys; print(sys.version)"
+   # → 3.12.x
+   ```
 
-Installation de pyngs
+### Installation de pyngs
+
 Pour être cohérent avec cette version de Python, on installe le wheel `cp312` de pyngs:
 
 ```bash
@@ -415,59 +405,57 @@ uv met à jour `pyproject.toml` et `uv.lock` et installe `pyngs` dans l’enviro
 Avec cette configuration:
 
 * les appels à `pyngs.core.NGSpiceInstance` fonctionnent correctement,
-* la mesure `fcut` est récupérée sans erreur,
+* la mesure `f_cutoff` est récupérée sans erreur,
 * l’erreur fatale `_PyThreadState_Attach` ne se reproduit plus.
 
-Remarque
 Ce choix de rester sur Python 3.12 est cohérent avec le contexte du TP, où `pyngs` est fourni sous forme de wheel précompilé pour cette version.
 
-````
+---
 
-Et pour documenter les pools, tu peux ajouter ceci dans la suite du README (par exemple après la question 5).
-
-```markdown
 ## Question 6 – Environnement de simulation en Python (SequentialPool et ParallelPool)
 
-Objectif  
+Objectif
 Créer un environnement de simulation générique capable de lancer automatiquement des simulations ngspice pour une liste de paramètres, avec deux modes:
 
-- un mode séquentiel (`SequentialPool`) qui exécute les simulations une par une,
-- un mode parallèle (`ParallelPool`) qui utilise plusieurs processus.
+* un mode séquentiel (`SequentialPool`) qui exécute les simulations une par une
+* un mode parallèle (`ParallelPool`) qui utilise plusieurs processus
 
-Interface commune  
-Les deux classes dérivent d’une classe de base `BasePool` définie dans `main/pools.py`.  
+Interface commune
+Les deux classes dérivent d’une classe de base `BasePool` définie dans `main/pools.py`.
 Cette classe stocke:
 
-- la liste des netlists SPICE à utiliser,
-- le nom de la mesure SPICE à récupérer (par exemple `fcut`).
+* la liste des netlists SPICE à utiliser
+* le nom de la mesure SPICE à récupérer (par exemple `f_cutoff`)
 
 L’interface attendue est:
 
 ```python
-pool = SequentialPool(["spice/rc_filter.cir"], measure_name="fcut")
-result = pool.run(values)
-````
+from main.pools import SequentialPool, ParallelPool
 
-où `values` est une `pandas.DataFrame` dont les colonnes correspondent aux paramètres SPICE (ici `R_val` et `C_val`).
+pool = SequentialPool(["spice/rc_filter.cir"], measure_name="f_cutoff")
+result = pool.run(values)
+```
+
+où `values` est une `pandas.DataFrame` dont les colonnes correspondent aux paramètres SPICE (ici `Rval` et `Cval`).
 
 ### SequentialPool
 
 `SequentialPool` crée une instance de `NGSpiceInstance` par netlist et charge les netlists une seule fois au constructeur.
 La méthode interne `_simulate_one`:
 
-* reçoit un dictionnaire `{"R_val": ..., "C_val": ...}`,
-* met à jour les paramètres dans ngspice avec `set_parameter`,
-* lance la simulation avec `run`,
-* lit la mesure demandée avec `get_measure(measure_name)`.
+* reçoit un dictionnaire `{"Rval": ..., "Cval": ...}`
+* met à jour les paramètres dans ngspice avec `set_parameter`
+* lance la simulation avec `run`
+* lit la mesure demandée avec `get_measure(measure_name)`
 
 La méthode `run(values)`:
 
-1. Parcourt les lignes de la DataFrame `values`.
-2. Pour chaque ligne, construit un dictionnaire `{nom_param: valeur}`.
-3. Choisit une instance ngspice (round robin si plusieurs netlists).
-4. Appelle `_simulate_one` et stocke la mesure dans une liste.
-5. À la fin, appelle `stop()` sur toutes les instances pour arrêter proprement ngspice.
-6. Renvoie une `DataFrame` avec une colonne `fcut` contenant toutes les mesures.
+1. Parcourt les lignes de la DataFrame `values`
+2. Pour chaque ligne, construit un dictionnaire `{nom_param: valeur}`
+3. Choisit une instance ngspice (round robin si plusieurs netlists)
+4. Appelle `_simulate_one` et stocke la mesure dans une liste
+5. À la fin, appelle `stop()` sur toutes les instances pour arrêter proprement ngspice
+6. Renvoie une `DataFrame` avec une colonne `f_cutoff` contenant toutes les mesures
 
 Ce mode est simple et suffisant pour un volume modéré de simulations.
 
@@ -476,21 +464,21 @@ Ce mode est simple et suffisant pour un volume modéré de simulations.
 `ParallelPool` utilise le module `multiprocessing` pour exécuter plusieurs simulations en parallèle.
 Chaque simulation est traitée par un processus fils qui:
 
-* crée sa propre `NGSpiceInstance`,
-* charge la netlist,
-* applique les paramètres,
-* lance la simulation,
-* renvoie la mesure `fcut`,
-* puis appelle `inst.stop()`.
+* crée sa propre `NGSpiceInstance`
+* charge la netlist
+* applique les paramètres
+* lance la simulation
+* renvoie la mesure `f_cutoff`
+* puis appelle `inst.stop()`
 
-L’implémentation:
+L’implémentation suit les étapes suivantes:
 
-1. Transforme chaque ligne de `values` en une tâche du type
-   `(chemin_netlist, measure_name, params, index)`.
-2. Associe les tâches aux netlists de manière round robin.
-3. Utilise un `multiprocessing.Pool` avec un nombre de processus égal au minimum entre le nombre de netlists et le nombre de cœurs CPU.
-4. Applique la fonction `_worker_task` à toutes les tâches.
-5. Récupère les couples `(index, valeur)`, trie par `index` pour retrouver l’ordre d’origine, et construit une DataFrame avec la colonne `fcut`.
+1. Transformer chaque ligne de `values` en une tâche du type
+   `(chemin_netlist, measure_name, params, index)`
+2. Associer les tâches aux netlists de manière round robin
+3. Utiliser un `multiprocessing.Pool` avec un nombre de processus égal au minimum entre le nombre de netlists et le nombre de cœurs CPU
+4. Appliquer la fonction `_worker_task` à toutes les tâches
+5. Récupérer les couples `(index, valeur)`, trier par `index` pour retrouver l’ordre d’origine, et construire une DataFrame avec la colonne `f_cutoff`
 
 Ce mode permet de réduire le temps total pour de grandes listes de paramètres, au prix d’une complexité un peu plus élevée.
 
@@ -501,35 +489,29 @@ Pour simplifier l’utilisation dans le script principal, une fonction utilitair
 ```python
 from main.pools import create_pool
 
-pool = create_pool("sequential", ["spice/rc_filter.cir"], measure_name="fcut")
+pool = create_pool("sequential", ["spice/rc_filter.cir"], measure_name="f_cutoff")
 # ou bien
-# pool = create_pool("parallel", ["spice/rc_filter.cir"], measure_name="fcut")
+# pool = create_pool("parallel", ["spice/rc_filter.cir"], measure_name="f_cutoff")
 ```
 
 Dans `main.py`:
 
-1. On construit la DataFrame `values` avec les colonnes `R_val` et `C_val`.
-2. On choisit le mode `"sequential"` ou `"parallel"`.
-3. On crée le pool avec `create_pool(...)`.
-4. On appelle `pool.run(values)` pour obtenir une DataFrame des fréquences de coupure `fcut`.
-5. On affiche les résultats.
+1. On construit la DataFrame `values` avec les colonnes `Rval` et `Cval`
+2. On choisit le mode `"sequential"` ou `"parallel"`
+3. On crée le pool avec `create_pool(...)`
+4. On appelle `pool.run(values)` pour obtenir une DataFrame des fréquences de coupure `f_cutoff`
+5. On affiche les résultats
 
 Les valeurs obtenues sont très proches de la fréquence de coupure théorique `fc = 1 / (2π R C)`, ce qui valide à la fois:
 
-* le filtre RC et la mesure `.meas ac fcut WHEN vdb(out) = -3` dans ngspice,
-* l’intégration de ngspice via `pyngs`,
-* et la logique de l’environnement de simulation en Python (séquentiel et parallèle).
-
-````
+* le filtre RC et la mesure `.meas ac f_cutoff WHEN vdb(out) = -3` dans ngspice
+* l’intégration de ngspice via `pyngs`
+* et la logique de l’environnement de simulation en Python (séquentiel et parallèle)
 
 ---
-
-### 2) Commit + push pour ce checkpoint
-
-Sans blabla:
 
 ```bash
 git add README.md pyproject.toml uv.lock
 git commit -m "Document Python 3.12 environment, pyngs setup and simulation pools"
 git push
-````
+```
