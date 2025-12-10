@@ -1,0 +1,41 @@
+* CMOS inverter static power characterization - SKY130 / Ciel
+
+***************  PDK + options  ***************
+.lib "/home/karim/IA_PROJET/pdk_local/ciel/sky130/versions/3c1a32a2e05bfbe3311ed348e60435f0a3468ef0/sky130A/libs.tech/ngspice/tt.lib.spice" tt
+
+.option method = trap
+.option reltol = 1e-3 abstol = 1e-12 vntol = 1e-6
+
+***************  Paramètres de l’inverseur  ***************
+.param vdd = 1.8
+.param lch = 0.15
+.param wn  = 0.42
+.param wp  = 0.84
+
+***************  Subckt inverseur CMOS  ***************
+.subckt inv in out vdd vss
+XMN out in vss vss sky130_fd_pr__nfet_01v8 L={lch} W={wn}
+XMP out in vdd vdd sky130_fd_pr__pfet_01v8 L={lch} W={wp}
+.ends inv
+
+***************  Point de repos (entrée forcée)  ***************
+* Ici on mesure la fuite quand l'entrée est à 0 V (sortie ~ VDD)
+VDD vdd 0 {vdd}
+VIN in  0 0
+
+XINV in out vdd 0 inv
+
+***************  Simulation temporelle pseudo-DC  ***************
+* On fait une petite simulation tran avec entrée constante.
+* Le courant sur VDD sera constant => moyenne = fuite statique.
+.tran 1n 10n
+
+***************  Mesures de fuite et puissance  ***************
+* Moyenne du courant I(VDD) entre 5 ns et 10 ns
+.meas tran ileak  AVG I(VDD) FROM=5n TO=10n
+
+* Puissance statique (on met un signe - car I(VDD) est généralement négatif)
+.meas tran pstatic PARAM='-vdd*ileak'
+
+.end
+
