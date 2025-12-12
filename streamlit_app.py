@@ -27,14 +27,15 @@ def history_to_df(history: List[TrainingSnapshot]) -> pd.DataFrame:
             "area_um": [h.area_um for h in history],
             "wn_um": [h.wn_um for h in history],
             "wp_um": [h.wp_um for h in history],
+            "elapsed_s": [h.elapsed_s for h in history],
         }
     )
 
 
-def render_live(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+def render_live(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float], Optional[float]]:
     if df.empty:
         st.info("En attente du premier snapshot…")
-        return None, None
+        return None, None, None
 
     last = df.iloc[-1]
     best_reward = float(df["reward"].max())
@@ -44,6 +45,10 @@ def render_live(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
     colB.metric("Best reward (snapshots)", f"{best_reward:.6f}")
     colC.metric("Last Wn (µm)", f"{last['wn_um']:.3f}")
     colD.metric("Last Wp (µm)", f"{last['wp_um']:.3f}")
+
+    colE, colF = st.columns(2)
+    colE.metric("Last elapsed", f"{float(last['elapsed_s']):.1f} s")
+    colF.metric("Snapshots", len(df))
 
     fig_reward = px.line(df, x="step", y="reward", markers=True, title="Best reward (snapshot) vs step")
     fig_reward.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10))
@@ -57,7 +62,7 @@ def render_live(df: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
     fig_pstatic.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10))
     st.plotly_chart(fig_pstatic, use_container_width=True)
 
-    return best_reward, float(last["step"])
+    return best_reward, float(last["step"]), float(last["elapsed_s"])
 
 
 # ---------- Sidebar ----------
@@ -99,6 +104,7 @@ if run and not st.session_state.training_running:
 
     q: "queue.Queue[tuple[TrainingSnapshot, Dict[str, float]]]" = queue.Queue()
     history: List[TrainingSnapshot] = []
+    best_live: Optional[Dict[str, float]] = None
     result_holder: Dict[str, object] = {"done": False, "summary": None, "error": None}
 
     def on_snapshot(snap: TrainingSnapshot, best: Dict[str, float]) -> None:
@@ -145,15 +151,20 @@ if run and not st.session_state.training_running:
                 snap, _best = q.get_nowait()
                 history.append(snap)
                 drained += 1
+                if _best and (best_live is None or float(_best.get("reward", -1e30)) > float(best_live.get("reward", -1e30))):
+                    best_live = _best
             except queue.Empty:
                 break
 
         elapsed = time.time() - t0
-        top.markdown(f"### Training running…  \nElapsed: **{elapsed:.1f}s** · snapshots: **{len(history)}**")
+        best_reward_str = f" · best reward: **{best_live['reward']:.4f}**" if best_live else ""
+        top.markdown(
+            f"### Training running…  \nElapsed: **{elapsed:.1f}s** · snapshots: **{len(history)}**{best_reward_str}"
+        )
 
         if history:
             df = history_to_df(history)
-            best_reward, last_step = render_live(df)
+            best_reward, last_step, _last_elapsed = render_live(df)
             if last_step is not None:
                 prog.progress(min(1.0, float(last_step) / float(total_timesteps)))
 

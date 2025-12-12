@@ -1,7 +1,9 @@
 # main/optimize_inv.py
 from __future__ import annotations
 
+import __main__
 import multiprocessing as mp
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -22,6 +24,7 @@ class TrainingSnapshot:
     tpavg_s: float
     pstatic_w: float
     area_um: float
+    elapsed_s: float
 
 
 def _make_env_factory(
@@ -56,10 +59,34 @@ def _choose_batch_size(rollout_size: int) -> int:
     return min(64, rollout_size)
 
 
+def _limit_threading() -> None:
+    """Limit BLAS/OpenMP threads to avoid oversubscription (important on shared hosts)."""
+
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ.setdefault(var, "1")
+
+
+def _pick_start_method(start_method: str) -> str:
+    """
+    Choose a safe start method.
+    - spawn for normal runs (libngspice is not fork-safe)
+    - fork fallback only for stdin/interactive cases where spawn cannot re-import
+    """
+
+    if start_method != "auto":
+        return start_method
+
+    main_file = getattr(__main__, "__file__", None)
+    if main_file is None or str(main_file).endswith("<stdin>"):
+        return "fork"
+    return "spawn"
+
+
 class BestTrainCallback(BaseCallback):
     """
     Tracks best point seen during TRAINING only (no extra eval env).
     Optional early-stop by plateau/target/walltime.
+    Can stream snapshots via a user callback for live UIs.
     """
 
     def __init__(
@@ -71,6 +98,7 @@ class BestTrainCallback(BaseCallback):
         warmup_snapshots: int = 3,
         target_reward: float | None = None,
         max_walltime_s: float | None = None,
+        on_snapshot: Callable[[TrainingSnapshot, Dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__()
         self.snapshot_interval = int(snapshot_interval)
@@ -80,6 +108,7 @@ class BestTrainCallback(BaseCallback):
         self.warmup_snapshots = int(warmup_snapshots)
         self.target_reward = None if target_reward is None else float(target_reward)
         self.max_walltime_s = None if max_walltime_s is None else float(max_walltime_s)
+        self._on_snapshot = on_snapshot
 
         self.history: List[TrainingSnapshot] = []
         self.best: Dict[str, Any] | None = None
@@ -118,12 +147,20 @@ class BestTrainCallback(BaseCallback):
             tpavg_s=float(ppa.get("tpavg", float("nan"))),
             pstatic_w=float(ppa.get("pstatic", float("nan"))),
             area_um=float(ppa.get("area_um", float("nan"))),
+            elapsed_s=float(time.time() - self._t0_wall),
         )
         self.history.append(snap)
         self._snap_idx += 1
 
         if self.best is None or float(b["reward"]) > float(self.best["reward"]):
             self.best = b
+
+        if self._on_snapshot is not None:
+            try:
+                self._on_snapshot(snap, b)
+            except Exception:
+                # UI callbacks should not break training
+                pass
 
         # stop if target reached
         if self.target_reward is not None and snap.reward >= self.target_reward:
@@ -165,7 +202,7 @@ def optimize_inverter(
     *,
     total_timesteps: int = 4000,
     max_steps: int = 40,
-    n_envs: int = 6,
+    n_envs: int = 1,
     snapshot_interval: int = 400,
     seed: int | None = None,
     start_method: str = "spawn",
@@ -175,16 +212,38 @@ def optimize_inverter(
     warmup_snapshots: int = 3,
     target_reward: float | None = None,
     max_walltime_s: float | None = None,
+    on_snapshot: Callable[[TrainingSnapshot, Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
-    factory = _make_env_factory(w_delay, w_power, w_area, max_steps)
+    _limit_threading()
+    resolved_start = _pick_start_method(start_method)
+    requested_envs = int(max(1, n_envs))
 
-    if n_envs > 1:
-        env: VecEnv = SubprocVecEnv([factory for _ in range(n_envs)], start_method=start_method)
+    factory = _make_env_factory(w_delay, w_power, w_area, max_steps)
+    env: VecEnv
+    effective_envs = requested_envs
+
+    if requested_envs > 1 and resolved_start != "spawn":
+        print(
+            f"[WARN] start_method={resolved_start} is not spawn; forcing n_envs=1 to avoid libngspice fork issues",
+            flush=True,
+        )
+        effective_envs = 1
+
+    if effective_envs > 1:
+        try:
+            env = SubprocVecEnv([factory for _ in range(effective_envs)], start_method=resolved_start)
+        except Exception as exc:
+            print(
+                f"[WARN] Failed to start SubprocVecEnv ({exc}); falling back to DummyVecEnv (n_envs=1)",
+                flush=True,
+            )
+            env = DummyVecEnv([factory])
+            effective_envs = 1
     else:
         env = DummyVecEnv([factory])
 
-    n_steps = _choose_n_steps(n_envs)
-    rollout_size = n_steps * max(1, n_envs)
+    n_steps = _choose_n_steps(effective_envs)
+    rollout_size = n_steps * max(1, effective_envs)
     batch_size = _choose_batch_size(rollout_size)
 
     model = PPO(
@@ -205,6 +264,7 @@ def optimize_inverter(
         warmup_snapshots=warmup_snapshots,
         target_reward=target_reward,
         max_walltime_s=max_walltime_s,
+        on_snapshot=on_snapshot,
     )
 
     t0 = time.perf_counter()
@@ -220,10 +280,12 @@ def optimize_inverter(
         "best": best,
         "history": callback.history,
         "training_time_s": t1 - t0,
-        "n_envs": n_envs,
+        "n_envs_requested": requested_envs,
+        "n_envs_used": effective_envs,
         "total_timesteps": total_timesteps,
         "n_steps": n_steps,
         "batch_size": batch_size,
+        "start_method": resolved_start,
         "weights": {"delay": w_delay, "power": w_power, "area": w_area},
     }
 
@@ -234,7 +296,7 @@ def main() -> None:
         w_power=1.0,
         w_area=1.0,
         total_timesteps=4000,
-        n_envs=6,
+        n_envs=1,
         max_steps=40,
         snapshot_interval=400,
         # early stop plateau
@@ -260,7 +322,8 @@ def main() -> None:
 
     print("\n=== Run info ===")
     print(f"training_time_s = {summary['training_time_s']:.2f}")
-    print(f"n_envs          = {summary['n_envs']}")
+    print(f"n_envs (req/used) = {summary['n_envs_requested']} / {summary['n_envs_used']}")
+    print(f"start_method    = {summary['start_method']}")
     print(f"n_steps         = {summary['n_steps']}")
     print(f"batch_size      = {summary['batch_size']}")
     print(f"total_timesteps = {summary['total_timesteps']}")
