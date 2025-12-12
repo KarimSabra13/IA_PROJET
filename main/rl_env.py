@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Any, Tuple
+from typing import Any, Dict, Tuple
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .inverter_spice import measure_ppa
+from .inverter_spice import InverterSpiceRunner
 
 
 @dataclass
@@ -18,14 +18,6 @@ class PPATargets:
 
 
 class InverterEnv(gym.Env):
-    """
-    Env RL pour optimiser (wn, wp) en microns d'un inverseur SKY130.
-
-    Action: Box[2] -> [wn_um, wp_um]
-    Observation: [wn_norm, wp_norm, delay_norm, power_norm, area_norm]
-    Reward: - (w_delay * d_norm + w_power * p_norm + w_area * a_norm)
-    """
-
     metadata = {"render_modes": []}
 
     def __init__(
@@ -33,7 +25,10 @@ class InverterEnv(gym.Env):
         w_delay: float = 1.0,
         w_power: float = 1.0,
         w_area: float = 1.0,
-        max_steps: int = 20,
+        max_steps: int = 40,
+        *,
+        restart_every: int = 50,
+        sim_fail_penalty: float = -1_000.0,
     ) -> None:
         super().__init__()
 
@@ -47,18 +42,21 @@ class InverterEnv(gym.Env):
             high=np.array([self.WN_MAX, self.WP_MAX], dtype=np.float32),
             dtype=np.float32,
         )
-
-        self.observation_space = spaces.Box(
-            low=0.0,
-            high=5.0,
-            shape=(5,),
-            dtype=np.float32,
-        )
+        self.observation_space = spaces.Box(low=0.0, high=5.0, shape=(5,), dtype=np.float32)
 
         self.w_delay = float(w_delay)
         self.w_power = float(w_power)
         self.w_area = float(w_area)
+        wsum = self.w_delay + self.w_power + self.w_area
+        if wsum <= 0:
+            self._wd = self._wpw = self._wa = 1.0 / 3.0
+        else:
+            self._wd = self.w_delay / wsum
+            self._wpw = self.w_power / wsum
+            self._wa = self.w_area / wsum
+
         self.max_steps = int(max_steps)
+        self.sim_fail_penalty = float(sim_fail_penalty)
 
         self._step_count = 0
         self._wn = 0.42
@@ -67,24 +65,40 @@ class InverterEnv(gym.Env):
         self._rng = np.random.default_rng()
         self._best: Dict[str, Any] | None = None
 
-    # ---------------- Helpers ----------------
+        # IMPORTANT: in-proc runner (no child process) -> compatible with SubprocVecEnv
+        self._spice = InverterSpiceRunner(restart_every=restart_every, debug=False)
 
     def _clip_widths(self, wn: float, wp: float) -> Tuple[float, float]:
-        wn_c = float(np.clip(wn, self.WN_MIN, self.WN_MAX))
-        wp_c = float(np.clip(wp, self.WP_MIN, self.WP_MAX))
-        return wn_c, wp_c
+        return float(np.clip(wn, self.WN_MIN, self.WN_MAX)), float(np.clip(wp, self.WP_MIN, self.WP_MAX))
 
     def _norm_width(self, wn: float, wp: float) -> Tuple[float, float]:
         wn_norm = (wn - self.WN_MIN) / (self.WN_MAX - self.WN_MIN)
         wp_norm = (wp - self.WP_MIN) / (self.WP_MAX - self.WP_MIN)
         return float(wn_norm), float(wp_norm)
 
-    def _compute_ppa(self, wn: float, wp: float) -> Dict[str, float]:
-        data = measure_ppa(wn, wp)
+    def _default_ppa(self, wn: float, wp: float) -> Dict[str, float]:
+        area_um = float(wn + wp)
+        return {
+            "tphl": 1.0,
+            "tplh": 1.0,
+            "tpavg": 1.0,
+            "pstatic": 1.0,
+            "area_um": area_um,
+            "delay_norm": 1.0,
+            "power_norm": 1.0,
+            "area_norm": 1.0,
+            "sim_ok": 0.0,
+        }
 
-        tpavg = data["tpavg"]
-        pstatic = data["pstatic"]
-        area_um = data["area_um"]
+    def _compute_ppa(self, wn: float, wp: float) -> Dict[str, float]:
+        try:
+            data = self._spice.measure(wn, wp)
+        except Exception:
+            return self._default_ppa(wn, wp)
+
+        tpavg = float(data["tpavg"])
+        pstatic = float(data["pstatic"])
+        area_um = float(data["area_um"])
 
         if self._targets is None:
             self._targets = PPATargets(
@@ -98,49 +112,31 @@ class InverterEnv(gym.Env):
         a_ref = self._targets.area_ref
 
         return {
-            "tphl": data["tphl"],
-            "tplh": data["tplh"],
+            "tphl": float(data["tphl"]),
+            "tplh": float(data["tplh"]),
             "tpavg": tpavg,
             "pstatic": pstatic,
             "area_um": area_um,
             "delay_norm": tpavg / d_ref,
             "power_norm": pstatic / p_ref,
             "area_norm": area_um / a_ref,
+            "sim_ok": 1.0,
         }
 
     def _make_obs(self, wn: float, wp: float, ppa: Dict[str, float]) -> np.ndarray:
         wn_norm, wp_norm = self._norm_width(wn, wp)
-        return np.array(
-            [
-                wn_norm,
-                wp_norm,
-                ppa["delay_norm"],
-                ppa["power_norm"],
-                ppa["area_norm"],
-            ],
-            dtype=np.float32,
-        )
+        return np.array([wn_norm, wp_norm, ppa["delay_norm"], ppa["power_norm"], ppa["area_norm"]], dtype=np.float32)
 
     def _compute_reward(self, ppa: Dict[str, float]) -> float:
-        d = ppa["delay_norm"]
-        p = ppa["power_norm"]
-        a = ppa["area_norm"]
-
-        wsum = self.w_delay + self.w_power + self.w_area
-        if wsum <= 0:
-            wd = wp = wa = 1.0 / 3.0
-        else:
-            wd = self.w_delay / wsum
-            wp = self.w_power / wsum
-            wa = self.w_area / wsum
-
-        obj = wd * d + wp * p + wa * a
-        return -float(obj)
+        if float(ppa.get("sim_ok", 1.0)) < 0.5:
+            return float(self.sim_fail_penalty)
+        d = float(ppa["delay_norm"])
+        p = float(ppa["power_norm"])
+        a = float(ppa["area_norm"])
+        return -float(self._wd * d + self._wpw * p + self._wa * a)
 
     def get_best(self) -> Dict[str, Any] | None:
         return self._best
-
-    # ---------------- API Gymnasium ----------------
 
     def reset(self, *, seed: int | None = None, options: Dict[str, Any] | None = None):
         super().reset(seed=seed)
@@ -157,35 +153,31 @@ class InverterEnv(gym.Env):
 
         ppa = self._compute_ppa(self._wn, self._wp)
         obs = self._make_obs(self._wn, self._wp, ppa)
-        info: Dict[str, Any] = {"wn_um": self._wn, "wp_um": self._wp, "ppa": ppa}
-        return obs, info
+        return obs, {"wn_um": self._wn, "wp_um": self._wp, "ppa": ppa}
 
     def step(self, action: np.ndarray):
         self._step_count += 1
-
-        action = np.asarray(action, dtype=np.float32).reshape(-1)
-        wn, wp = float(action[0]), float(action[1])
-        self._wn, self._wp = self._clip_widths(wn, wp)
+        a = np.asarray(action, dtype=np.float32).reshape(-1)
+        self._wn, self._wp = self._clip_widths(float(a[0]), float(a[1]))
 
         ppa = self._compute_ppa(self._wn, self._wp)
         obs = self._make_obs(self._wn, self._wp, ppa)
         reward = self._compute_reward(ppa)
 
         terminated = bool(self._step_count >= self.max_steps)
-        truncated = False
+        truncated = bool(float(ppa.get("sim_ok", 1.0)) < 0.5)
 
-        info: Dict[str, Any] = {
-            "wn_um": self._wn,
-            "wp_um": self._wp,
-            "ppa": ppa,
-        }
+        info: Dict[str, Any] = {"wn_um": self._wn, "wp_um": self._wp, "ppa": ppa}
 
-        if self._best is None or reward > self._best["reward"]:
-            self._best = {
-                "reward": reward,
-                "wn_um": self._wn,
-                "wp_um": self._wp,
-                "ppa": ppa,
-            }
+        if not truncated:
+            if self._best is None or float(reward) > float(self._best["reward"]):
+                self._best = {"reward": float(reward), "wn_um": float(self._wn), "wp_um": float(self._wp), "ppa": ppa}
 
-        return obs, reward, terminated, truncated, info
+        return obs, float(reward), terminated, truncated, info
+
+    def close(self):
+        try:
+            self._spice.close()
+        except Exception:
+            pass
+        return super().close()

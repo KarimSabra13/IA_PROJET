@@ -1,93 +1,120 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 from pyngs.core import NGSpiceInstance
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INV_CHAR_NETLIST = PROJECT_ROOT / "spice" / "inv_char.cir"
+MEASURES = ("tphl", "tplh", "tpavg", "ileak", "pstatic")
 
 
-def _run_measures(
-    parameters: Dict[str, float],
-    measure_names: list[str],
-) -> Dict[str, float]:
+class InverterSpiceRunner:
     """
-    Charge inv_char.cir, applique des paramètres, lance ngspice et lit les mesures.
+    In-process runner, compatible SubprocVecEnv.
+    Key: each process gets its own workdir to avoid ngspice temp/raw collisions.
     """
-    print(f"[DEBUG] Loading netlist: {INV_CHAR_NETLIST}")
-    inst = NGSpiceInstance()
-    inst.load(INV_CHAR_NETLIST)
 
-    for name, value in parameters.items():
-        print(f"[DEBUG] set_parameter {name} = {value}")
-        inst.set_parameter(name, value)
+    def __init__(
+        self,
+        netlist_path: Path = INV_CHAR_NETLIST,
+        *,
+        restart_every: int = 25,
+        debug: bool = False,
+    ) -> None:
+        self.netlist_path = Path(netlist_path)
+        self.restart_every = int(restart_every)
+        self.debug = bool(debug)
 
-    print("[DEBUG] Running ngspice simulation...")
-    inst.run()
+        self._tmp: Optional[tempfile.TemporaryDirectory] = None
+        self._inst: Optional[NGSpiceInstance] = None
+        self._jobs = 0
 
-    out: Dict[str, float] = {}
-    for m in measure_names:
-        val = inst.get_measure(m)
-        print(f"[DEBUG] get_measure('{m}') = {val}")
-        out[m] = float(val)
+        self._make_workdir()
+        self._init()
 
-    inst.stop()
-    print("[DEBUG] Stopped NGSpiceInstance")
-    return out
+    def _make_workdir(self) -> None:
+        if self._tmp is None:
+            self._tmp = tempfile.TemporaryDirectory(prefix="pyngs_inv_")
+        # isolate ngspice side-files per worker
+        os.chdir(self._tmp.name)
+        os.environ["TMPDIR"] = self._tmp.name
 
+    def _init(self) -> None:
+        self._make_workdir()
+        if self.debug:
+            print(f"[DEBUG] CWD={os.getcwd()}")
+            print(f"[DEBUG] Loading netlist: {self.netlist_path}")
+        self._inst = NGSpiceInstance()
+        self._inst.load(self.netlist_path)
+        self._jobs = 0
 
-def measure_ppa(
-    wn_um: float,
-    wp_um: float,
-    vdd: float = 1.8,
-    lch_um: float = 0.15,
-    k_area: float = 1.0,
-) -> Dict[str, Any]:
-    """
-    Mesure tphl, tplh, tpavg, ileak, pstatic à partir d'un seul netlist.
-    """
-    params = {
-        "wn": wn_um,
-        "wp": wp_um,
-        "vdd": vdd,
-        "lch": lch_um,
-    }
+    def _restart(self) -> None:
+        try:
+            if self._inst is not None:
+                self._inst.stop()
+        except Exception:
+            pass
+        self._inst = None
+        self._init()
 
-    measures = ["tphl", "tplh", "tpavg", "ileak", "pstatic"]
-    res = _run_measures(params, measures)
+    def measure(
+        self,
+        wn_um: float,
+        wp_um: float,
+        *,
+        vdd: float = 1.8,
+        lch_um: float = 0.15,
+        k_area: float = 1.0,
+    ) -> Dict[str, Any]:
+        if self._inst is None:
+            self._init()
 
-    # Aire estimate: proportionnelle à wn + wp
-    res["area_um"] = k_area * (wn_um + wp_um)
-    res["wn_um"] = wn_um
-    res["wp_um"] = wp_um
-    return res
+        if self.restart_every > 0 and self._jobs >= self.restart_every:
+            self._restart()
 
+        def _run_once() -> Dict[str, Any]:
+            assert self._inst is not None
+            self._inst.set_parameter("wn", float(wn_um))
+            self._inst.set_parameter("wp", float(wp_um))
+            self._inst.set_parameter("vdd", float(vdd))
+            self._inst.set_parameter("lch", float(lch_um))
 
-def main() -> None:
-    wn = 0.42
-    wp = 0.84
+            self._inst.run()
 
-    print("=== Inverter SKY130 – full PPA via pyngs ===")
-    print(f"Wn = {wn:.3f} µm, Wp = {wp:.3f} µm\n")
+            out: Dict[str, Any] = {}
+            for m in MEASURES:
+                out[m] = float(self._inst.get_measure(m))
 
-    ppa = measure_ppa(wn, wp)
+            out["area_um"] = float(k_area * (float(wn_um) + float(wp_um)))
+            out["wn_um"] = float(wn_um)
+            out["wp_um"] = float(wp_um)
+            return out
 
-    print("\n=== Results ===")
-    print("Delay (ps):")
-    print(f"  tphl  = {ppa['tphl'] * 1e12:.3f} ps")
-    print(f"  tplh  = {ppa['tplh'] * 1e12:.3f} ps")
-    print(f"  tpavg = {ppa['tpavg'] * 1e12:.3f} ps\n")
+        try:
+            res = _run_once()
+        except Exception:
+            # hard reset + retry once
+            self._restart()
+            res = _run_once()
 
-    print("Static power / leakage:")
-    print(f"  ileak   = {ppa['ileak'] * 1e12:.6f} pA")
-    print(f"  pstatic = {ppa['pstatic'] * 1e12:.6f} pW")
+        self._jobs += 1
+        return res
 
-    print("\nArea estimate:")
-    print(f"  area*   = {ppa['area_um']:.3f} µm (wn + wp)")
+    def close(self) -> None:
+        try:
+            if self._inst is not None:
+                self._inst.stop()
+        except Exception:
+            pass
+        self._inst = None
 
-
-if __name__ == "__main__":
-    main()
-
+        try:
+            if self._tmp is not None:
+                self._tmp.cleanup()
+        except Exception:
+            pass
+        self._tmp = None
