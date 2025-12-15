@@ -1,535 +1,686 @@
-````markdown
-# TP – Filtre RC, ngspice et pyngs
+```markdown
+# SKY130 StdCell RL Optimizer (PoC)  
+Fast, robust, parallel training with live GUI, and reproducible setup.
 
-## Structure du projet
+This repo is a proof of concept for optimizing SKY130 standard-cell style CMOS gates with reinforcement learning.  
+We start with an inverter. Next step will be NOR2, then more cells.
 
-Le projet est organisé comme suit:
+Core goals:
+- Optimize propagation delay (TPHL, TPLH, and TPAVG)
+- Optimize static power (leakage, measured across input states)
+- Optimize area proxy (sum of widths)
+- Provide a professional GUI that shows live progress and explains what is happening
 
-- `spice/` : netlists ngspice  
-  - `spice/rc_filter.cir` : filtre RC du premier ordre avec mesure de la fréquence de coupure
-- `main/` : code Python réutilisable  
-  - `main/rc_analysis.py` : fonctions pour lancer ngspice via pyngs et récupérer la fréquence de coupure
-- `main.py` : script principal qui appelle les fonctions de `main/rc_analysis.py`
-- `deps/` : fichiers wheel fournis pour pyngs  
-  - `deps/pyngs-0.0.2-cp313-cp313-linux_x86_64.whl`
-- `results/` : répertoire prévu pour logs, CSV, figures
-- `pyproject.toml`, `uv.lock` : configuration du projet uv et dépendances
+This README covers:
+- What the project does
+- The full setup from scratch
+- The full flow end-to-end
+- Each file and its logic
+- Common failures and fixes
+- How to run overnight training safely
 
----
 
-## Question 1 – Filtre RC du premier ordre
+## 0) What we built so far
 
-Objectif  
-Décrire un filtre RC du premier ordre en SPICE, avec des paramètres pour R et C, puis calculer la fréquence de coupure théorique.
+### What works now
+- Netlist generation from Python
+- ngspice batch runs for each action
+- Robust log parsing for measures
+- Reward computation from delay, static power, area
+- PPO training that can run with multiple parallel workers
+- Clean run isolation per training session
+- Live GUI that:
+  - Starts and stops training
+  - Shows live curves and a Pareto-style scatter
+  - Shows backend logs
+  - Simulates the best solution and plots waveform (vin, vout)
 
-Description du circuit  
-On modélise un filtre RC passe-bas:
+### Key design decisions (based on real issues we hit)
+We originally tried embedded ngspice via pyngs. It worked for single runs but broke under stress and parallel training. We saw errors like “circuit not parsed” and even memory corruption crashes.
+So we moved to the most robust approach for parallelism:
+- Use ngspice CLI (`ngspice -b`) per simulation
+- Run workers in separate processes (SubprocVecEnv)
+- Use `spawn` start method
+- Write netlists and outputs to unique paths per worker and per simulation
 
-- Source Vin appliquée sur une résistance R.
-- Un condensateur C entre la sortie et la masse.
-- La sortie se trouve entre R et C.
+This is the fastest path that also stays stable for long runs.
 
-Le netlist SPICE utilise des paramètres pour R et C:
 
-- `Rval` = valeur de la résistance
-- `Cval` = valeur de la capacité
+## 1) Repo structure
 
-Netlist de base (contenu de `spice/rc_filter.cir`):
-
-```spice
-* Filtre RC passe-bas du premier ordre
-
-.param Rval = 1k
-.param Cval = 100n
-
-Vin in 0 AC 1
-R1 in out {Rval}
-C1 out 0 {Cval}
-
-.ac dec 100 10 1Meg
-
-.end
-````
-
-Fréquence de coupure théorique
-
-Formule:
-
-```text
-fc = 1 / (2 * pi * R * C)
+Typical structure:
 ```
 
-Avec:
-
-* R = 1 kΩ = 1e3 ohms
-* C = 100 nF = 100e-9 farads
-
-Produit RC:
-
-```text
-RC = 1e3 * 100e-9 = 1e-4 secondes
-```
-
-Donc:
-
-```text
-fc = 1 / (2 * pi * 1e-4)
-fc ≈ 1 / (6.283e-4)
-fc ≈ 1.59e3 Hz
-```
-
-Fréquence de coupure théorique du filtre:
-
-```text
-fc ≈ 1.6 kHz
-```
-
-Le netlist complet du filtre est dans le fichier `spice/rc_filter.cir`.
-
----
-
-## Question 2 – Source de tension et simulation AC
-
-Objectif
-Ajouter une source de tension sur l’entrée du filtre et configurer une simulation AC pour pouvoir extraire la fréquence de coupure.
-
-Choix de la source
-On utilise une source de tension Vin entre le nœud `in` et la masse, avec une amplitude AC de 1 V.
-En SPICE, le mot clé `AC` définit l’amplitude pour l’analyse fréquentielle petit signal.
-
-Ligne correspondante dans le netlist:
-
-```spice
-Vin in 0 AC 1
-```
-
-Configuration de la simulation AC
-On réalise un balayage fréquentiel logarithmique de 10 Hz à 1 MHz avec 100 points par décade.
-Directive utilisée:
-
-```spice
-.ac dec 100 10 1Meg
-```
-
-Interprétation
-
-* À basse fréquence, le condensateur se comporte comme un circuit ouvert, le gain en sortie vaut environ 1 (0 dB).
-* Quand la fréquence augmente, la tension de sortie diminue.
-* La fréquence de coupure est la fréquence pour laquelle le gain est tombé à `1 / sqrt(2)` de la valeur basse fréquence, soit environ −3 dB.
-* La simulation AC permet de visualiser `V(out)` en fonction de la fréquence et de comparer ensuite la fréquence de coupure mesurée à la valeur théorique calculée à la question 1.
-
----
-
-## Question 3 – Mesure de la fréquence de coupure avec `.meas`
-
-Objectif
-Automatiser le calcul de la fréquence de coupure directement dans ngspice.
-
-Principe
-Pour une source AC de 1 V, le gain en décibels vaut:
-
-```text
-gain_dB = vdb(out)
-```
-
-La fréquence de coupure correspond au point où le gain vaut −3 dB.
-
-La directive `.meas` utilisée dans `spice/rc_filter.cir` est:
-
-```spice
-.meas ac f_cutoff WHEN vdb(out) = -3
-```
-
-Explication des mots clés:
-
-* `.meas ac` : demande une mesure sur l’analyse AC.
-* `f_cutoff` : nom du résultat qui apparaîtra dans la sortie de ngspice.
-* `WHEN vdb(out) = -3` : ngspice recherche la fréquence pour laquelle `vdb(out)` atteint −3 dB en interpolant entre les points du sweep AC.
-
-Utilisation
-
-Lancer ngspice sur le fichier:
-
-```bash
-ngspice spice/rc_filter.cir
-```
-
-À la fin de l’analyse, ngspice affiche une ligne du type:
-
-```text
-f_cutoff = 1.59e+03
-```
-
-Cette fréquence se compare ensuite à la valeur théorique 1.6 kHz obtenue à la question 1.
-
----
-
-## Question 4 – Exécution de ngspice et validation de la fréquence de coupure
-
-Objectif
-Exécuter le fichier `spice/rc_filter.cir` dans ngspice et vérifier que la mesure `.meas` donne une fréquence de coupure proche de la valeur théorique.
-
-Procédure en mode interactif
-
-Depuis le dossier du projet:
-
-```bash
-ngspice spice/rc_filter.cir
-```
-
-Ngspice charge le netlist et affiche un prompt:
-
-```text
-ngspice 1 ->
-```
-
-On lance alors la simulation AC avec:
-
-```text
-run
-```
-
-À la fin de la simulation, ngspice exécute la directive:
-
-```spice
-.meas ac f_cutoff WHEN vdb(out) = -3
-```
-
-et affiche une ligne du type:
-
-```text
-f_cutoff = 1.590e+03
-```
-
-Comparaison avec la théorie
-
-* Fréquence de coupure théorique calculée à la question 1:
-
-```text
-fc_th ≈ 1.59e3 Hz
-```
-
-* Valeur mesurée par ngspice:
-
-```text
-fc_meas ≈ 1.59e3 Hz
-```
-
-Les deux valeurs sont presque identiques, ce qui confirme que le netlist, la source de tension, la simulation AC et la mesure `.meas` sont corrects.
-
----
-
-## Question 5 – Utilisation de pyngs et balayage en Python
-
-Objectif
-Récupérer la fréquence de coupure depuis ngspice en Python à l’aide du module `pyngs`, puis mesurer cette fréquence pour une liste de couples (R, C).
-
-Installation de pyngs
-
-Le wheel fourni est placé dans le dossier `deps/` puis installé avec uv:
-
-```bash
-uv pip install deps/pyngs-0.0.2-cp313-cp313-linux_x86_64.whl
-```
-
-uv met automatiquement à jour `pyproject.toml` et `uv.lock`.
-
-Intégration avec pyngs
-
-On utilise la classe `NGSpiceInstance` du module `pyngs.core`.
-La logique est encapsulée dans `main/rc_analysis.py`:
-
-* `spice/rc_filter.cir` contient le filtre RC et la mesure `.meas ac f_cutoff WHEN vdb(out) = -3`.
-* La fonction `sweep_cutoff` charge le netlist, met à jour les paramètres `Rval` et `Cval` pour chaque couple `(R, C)`, lance la simulation et lit la mesure `f_cutoff` avec `inst.get_measure("f_cutoff")`.
-* La fonction `theoretical_cutoff` calcule la fréquence de coupure théorique:
-
-```text
-fc = 1 / (2 * pi * R * C)
-```
-
-Exemple de code dans `main/rc_analysis.py` (simplifié):
-
-```python
-from math import pi
-from pathlib import Path
-from typing import Iterable, Tuple, Dict, Any
-
-from pyngs.core import NGSpiceInstance
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-NETLIST_PATH = PROJECT_ROOT / "spice" / "rc_filter.cir"
-
-
-def theoretical_cutoff(R: float, C: float) -> float:
-    return 1.0 / (2.0 * pi * R * C)
-
-
-def sweep_cutoff(rc_values: Iterable[Tuple[float, float]]) -> list[Dict[str, Any]]:
-    inst = NGSpiceInstance()
-    inst.load(NETLIST_PATH)
-
-    results = []
-
-    for R, C in rc_values:
-        inst.set_parameter("Rval", R)
-        inst.set_parameter("Cval", C)
-        inst.run()
-        f_meas = inst.get_measure("f_cutoff")
-        f_th = theoretical_cutoff(R, C)
-
-        results.append(
-            {
-                "R": R,
-                "C": C,
-                "f_theoretical": f_th,
-                "f_measured": f_meas,
-            }
-        )
-
-    return results
-```
-
-Script principal `main.py`
-
-Le script principal définit une liste de couples `(R, C)` et appelle `sweep_cutoff`:
-
-```python
-from main.rc_analysis import sweep_cutoff
-
-
-def main() -> None:
-    rc_values = [
-        (1e3, 100e-9),
-        (2e3, 100e-9),
-        (1e3, 220e-9),
-        (4.7e3, 47e-9),
-    ]
-
-    results = sweep_cutoff(rc_values)
-
-    print("R (ohm)\tC (F)\t\tf_th (Hz)\t\tf_meas (Hz)")
-    for r in results:
-        print(
-            f"{r['R']:.0f}\t"
-            f"{r['C']:.2e}\t"
-            f"{r['f_theoretical']:.2f}\t"
-            f"{r['f_measured']:.2f}"
-        )
-
-
-if __name__ == "__main__":
-    main()
-```
-
-Exécution:
-
-```bash
-uv run python main.py
-```
-
-Le programme affiche pour chaque couple `(R, C)`:
-
-* la fréquence de coupure théorique,
-* la fréquence de coupure mesurée par ngspice.
-
-Les valeurs mesurées sont très proches des valeurs théoriques, ce qui valide le filtre RC, la mesure `.meas` et l’intégration Python via pyngs.
+stdcell_rl_poc/
+main/
+config.py
+netlist_gen.py
+spice_runner.py
+smoke_test.py
+rl_env.py
+reward.py
+optimize_inv.py
+gui_app.py
+spice/
+templates/              (optional, if you use templates)
+generated/              (older single-file approach, kept for reference)
+results/
+run_YYYYMMDD_HHMMSS/
+status.json
+best.json
+history.csv
+checkpoints/
+worker_<pid>/
+inv_<id>.cir
+inv_<id>.log
+inv_<id>.raw
+pyproject.toml
+uv.lock
+README.md
 
 ````
 
-Ensuite:
+Notes:
+- New robust flow writes into `results/run_.../worker_<pid>/...`
+- The old flow used `spice/generated/inv_char.cir`. That is unsafe under parallel runs.
 
-```bash
-git add README.md
-git commit -m "Update README with project structure and questions 1–5"
-git push
+
+## 2) Requirements
+
+### System
+- Linux recommended
+- ngspice installed and working:
+  ```bash
+  ngspice -v
 ````
 
+### Python
 
+* Python 3.12 (we pinned this because some wheels fail on 3.13 in our setup)
+* uv for env management
 
-
-
-Voici quoi ajouter dans ton README, puis les commandes git à la fin.
-
----
-
-## Environnement Python, uv et pyngs
-
-Le projet utilise `uv` pour gérer l’environnement Python et les dépendances.
-
-Version de Python  
-Au départ, le projet était configuré avec:
-
-```toml
-requires-python = ">=3.13"
-````
-
-et uv utilisait Python 3.13.9.
-Avec cette configuration, l’appel au module `pyngs.core` provoquait une erreur fatale à la fin de l’exécution de Python:
-
-```text
-Fatal Python error: _PyThreadState_Attach: non-NULL old thread state
-Python runtime state: initialized
-Extension modules: ..., pyngs.core
-```
-
-Cette erreur ne vient pas du code Python, mais d’un problème de compatibilité entre la version 3.13 de Python et le module natif `pyngs.core`.
-
-Pour stabiliser l’environnement, le projet a été basculé sur Python 3.12, de la façon suivante:
-
-1. Modifier `pyproject.toml` pour autoriser Python 3.12:
-
-```toml
-requires-python = ">=3.12,<3.13"
-```
-
-2. Installer et pinner Python 3.12 avec uv:
+If uv is installed:
 
 ```bash
-uv python install 3.12
+uv --version
+```
+
+## 3) Setup from scratch
+
+Go to your repo directory:
+
+```bash
+cd ~/stdcell_rl_poc
+```
+
+### 3.1 Create and sync the environment
+
+```bash
 uv python pin 3.12
-```
-
-3. Recréer l’environnement virtuel et resynchroniser les dépendances:
-
-```bash
-rm -rf .venv
 uv sync
 ```
 
-4. Vérifier la version utilisée par uv:
+Important rule:
+
+* Always run project commands like this:
+
+  ```bash
+  uv run python -m <module>
+  ```
+
+If you run `python -m ...` directly, you might use system Python and miss deps.
+
+Example of what happened before:
+
+* GUI crashed with `ModuleNotFoundError: numpy`
+* Fix was running with `uv run`
+
+### 3.2 Install missing Python deps (if needed)
+
+If the GUI or optimizer complains about missing packages, install them:
 
 ```bash
-uv run python -c "import sys; print(sys.version)"
-# → 3.12.x
+uv add numpy pandas pyside6 pyqtgraph stable-baselines3 gymnasium jinja2 spicelib
+uv sync
 ```
 
-Installation de pyngs
-Pour être cohérent avec cette version de Python, on installe le wheel `cp312` de pyngs:
+## 4) SKY130 PDK setup (ciel)
+
+You currently have:
 
 ```bash
-uv pip install deps/pyngs-0.0.2-cp312-cp312-linux_x86_64.whl
+uvx ciel ls --pdk-family sky130
+No PDKs installed.
 ```
 
-uv met à jour `pyproject.toml` et `uv.lock` et installe `pyngs` dans l’environnement virtuel `.venv`.
+### 4.1 List available SKY130 builds
 
-Avec cette configuration:
-
-* les appels à `pyngs.core.NGSpiceInstance` fonctionnent correctement,
-* la mesure `fcut` est récupérée sans erreur,
-* l’erreur fatale `_PyThreadState_Attach` ne se reproduit plus.
-
-Remarque
-Ce choix de rester sur Python 3.12 est cohérent avec le contexte du TP, où `pyngs` est fourni sous forme de wheel précompilé pour cette version.
-
-````
-
-Et pour documenter les pools, tu peux ajouter ceci dans la suite du README (par exemple après la question 5).
-
-```markdown
-## Question 6 – Environnement de simulation en Python (SequentialPool et ParallelPool)
-
-Objectif  
-Créer un environnement de simulation générique capable de lancer automatiquement des simulations ngspice pour une liste de paramètres, avec deux modes:
-
-- un mode séquentiel (`SequentialPool`) qui exécute les simulations une par une,
-- un mode parallèle (`ParallelPool`) qui utilise plusieurs processus.
-
-Interface commune  
-Les deux classes dérivent d’une classe de base `BasePool` définie dans `main/pools.py`.  
-Cette classe stocke:
-
-- la liste des netlists SPICE à utiliser,
-- le nom de la mesure SPICE à récupérer (par exemple `fcut`).
-
-L’interface attendue est:
-
-```python
-pool = SequentialPool(["spice/rc_filter.cir"], measure_name="fcut")
-result = pool.run(values)
-````
-
-où `values` est une `pandas.DataFrame` dont les colonnes correspondent aux paramètres SPICE (ici `R_val` et `C_val`).
-
-### SequentialPool
-
-`SequentialPool` crée une instance de `NGSpiceInstance` par netlist et charge les netlists une seule fois au constructeur.
-La méthode interne `_simulate_one`:
-
-* reçoit un dictionnaire `{"R_val": ..., "C_val": ...}`,
-* met à jour les paramètres dans ngspice avec `set_parameter`,
-* lance la simulation avec `run`,
-* lit la mesure demandée avec `get_measure(measure_name)`.
-
-La méthode `run(values)`:
-
-1. Parcourt les lignes de la DataFrame `values`.
-2. Pour chaque ligne, construit un dictionnaire `{nom_param: valeur}`.
-3. Choisit une instance ngspice (round robin si plusieurs netlists).
-4. Appelle `_simulate_one` et stocke la mesure dans une liste.
-5. À la fin, appelle `stop()` sur toutes les instances pour arrêter proprement ngspice.
-6. Renvoie une `DataFrame` avec une colonne `fcut` contenant toutes les mesures.
-
-Ce mode est simple et suffisant pour un volume modéré de simulations.
-
-### ParallelPool
-
-`ParallelPool` utilise le module `multiprocessing` pour exécuter plusieurs simulations en parallèle.
-Chaque simulation est traitée par un processus fils qui:
-
-* crée sa propre `NGSpiceInstance`,
-* charge la netlist,
-* applique les paramètres,
-* lance la simulation,
-* renvoie la mesure `fcut`,
-* puis appelle `inst.stop()`.
-
-L’implémentation:
-
-1. Transforme chaque ligne de `values` en une tâche du type
-   `(chemin_netlist, measure_name, params, index)`.
-2. Associe les tâches aux netlists de manière round robin.
-3. Utilise un `multiprocessing.Pool` avec un nombre de processus égal au minimum entre le nombre de netlists et le nombre de cœurs CPU.
-4. Applique la fonction `_worker_task` à toutes les tâches.
-5. Récupère les couples `(index, valeur)`, trie par `index` pour retrouver l’ordre d’origine, et construit une DataFrame avec la colonne `fcut`.
-
-Ce mode permet de réduire le temps total pour de grandes listes de paramètres, au prix d’une complexité un peu plus élevée.
-
-### Utilisation via `create_pool` et `main.py`
-
-Pour simplifier l’utilisation dans le script principal, une fonction utilitaire `create_pool` est définie dans `main/pools.py`:
-
-```python
-from main.pools import create_pool
-
-pool = create_pool("sequential", ["spice/rc_filter.cir"], measure_name="fcut")
-# ou bien
-# pool = create_pool("parallel", ["spice/rc_filter.cir"], measure_name="fcut")
-```
-
-Dans `main.py`:
-
-1. On construit la DataFrame `values` avec les colonnes `R_val` et `C_val`.
-2. On choisit le mode `"sequential"` ou `"parallel"`.
-3. On crée le pool avec `create_pool(...)`.
-4. On appelle `pool.run(values)` pour obtenir une DataFrame des fréquences de coupure `fcut`.
-5. On affiche les résultats.
-
-Les valeurs obtenues sont très proches de la fréquence de coupure théorique `fc = 1 / (2π R C)`, ce qui valide à la fois:
-
-* le filtre RC et la mesure `.meas ac fcut WHEN vdb(out) = -3` dans ngspice,
-* l’intégration de ngspice via `pyngs`,
-* et la logique de l’environnement de simulation en Python (séquentiel et parallèle).
-
-````
-
----
-
-### 2) Commit + push pour ce checkpoint
-
-Sans blabla:
+Try:
 
 ```bash
-git add README.md pyproject.toml uv.lock
-git commit -m "Document Python 3.12 environment, pyngs setup and simulation pools"
-git push
-````
+uvx ciel ls-remote --pdk-family sky130
+```
+
+### 4.2 Enable one PDK version
+
+Pick a hash from the output and enable it:
+
+```bash
+uvx ciel enable --pdk-family sky130 <HASH>
+```
+
+### 4.3 Find `sky130.lib.spice` on disk
+
+After enabling, locate the ngspice library:
+
+```bash
+find ~/.ciel -type f -name "sky130.lib.spice" | head -n 20
+```
+
+Take the path you want and export it:
+
+```bash
+export SKY130_LIB_SPICE="/absolute/path/to/sky130.lib.spice"
+```
+
+Optional: persist in your shell config:
+
+```bash
+echo 'export SKY130_LIB_SPICE="/absolute/path/to/sky130.lib.spice"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Verify:
+
+```bash
+echo "$SKY130_LIB_SPICE"
+ls -l "$SKY130_LIB_SPICE"
+```
+
+If `$SKY130_LIB_SPICE` is wrong, ngspice will fail with “can’t find model …”.
+
+Also verify ngspice works with that lib:
+
+```bash
+ngspice -b -o /tmp/ng_check.log - <<'SP'
+* tiny check
+.end
+SP
+```
+
+## 5) The full flow end-to-end
+
+### Step A: Generate a netlist for the inverter
+
+```bash
+uv run python -m main.netlist_gen --cell inv --wn 0.5 --wp 1.0
+```
+
+This creates a characterization netlist with:
+
+* VDD supply
+* Input pulse
+* Inverter devices with parametrized widths
+* Transient run
+* `.meas` for:
+
+  * tphl
+  * tplh
+  * tpavg = (tphl + tplh)/2
+  * idd_low, idd_high
+  * pstatic_low, pstatic_high, pstatic_avg
+
+Earlier bug we hit:
+
+* We generated `.meas` using braces `{}` and it broke ngspice parsing.
+* We fixed the netlist generator so ngspice accepts it.
+
+### Step B: Smoke test one simulation
+
+```bash
+uv run python -m main.smoke_test --wn 0.5 --wp 1.0
+```
+
+Expected output example:
+
+* tphl, tplh, tpavg
+* pstatic_avg
+* idd_low, idd_high
+* log path
+
+Earlier bug we hit:
+
+* Measures were in the log with extra fields like `targ=` and `trig=`.
+* Our parser regex was too strict and missed them.
+* We fixed `_MEAS_RE` to capture the value even if text follows it.
+
+### Step C: Produce raw waveform for plotting
+
+```bash
+uv run python -m main.smoke_test --wn 0.5 --wp 1.0 --raw
+```
+
+This produces a `.raw` file that can be loaded by the GUI waveform viewer.
+
+### Step D: Run training in CLI (parallel workers)
+
+Example:
+
+```bash
+uv run python -m main.optimize_inv --n_envs 6 --timesteps 400000 --patience 60000
+```
+
+What it does:
+
+* Spawns `n_envs` worker processes
+* Each worker repeatedly:
+
+  * Samples action (wn, wp)
+  * Generates unique netlist
+  * Runs ngspice in batch mode
+  * Extracts measures
+  * Computes reward
+* The callback writes live files:
+
+  * `status.json` with timesteps, fps, errors, best
+  * `best.json` updated on improvements
+  * `history.csv` snapshots of best over time
+  * checkpoints in `checkpoints/`
+
+Stop conditions:
+
+* Plateau stop after `--patience` steps with no best improvement
+* Hard stop at `--timesteps`
+
+### Step E: Run the GUI (best user experience)
+
+```bash
+uv run python -m main.gui_app
+```
+
+GUI features:
+
+* Select weights for delay, static power, area
+* Set width bounds
+* Set number of parallel envs
+* Set timesteps and plateau patience
+* Start and stop training
+* Live plots:
+
+  * best_reward vs step
+  * best_tpavg vs step
+  * best_pstatic_avg vs step
+  * Pareto-style scatter tpavg vs pstatic
+* Backend logs tab
+* “Simulate best + waveform” button:
+
+  * runs ngspice for the best wn/wp
+  * loads `.raw`
+  * plots vin and vout
+
+## 6) Multi-objective logic
+
+We do not truly optimize three objectives at once directly. We convert them into a scalar reward using weights.
+
+Metrics:
+
+* delay metric: `tpavg`
+* static metric: `pstatic_avg`
+* area metric: `area_um = wn_um + wp_um`
+
+Reward is a weighted sum of normalized metrics:
+
+* Normalize against a reference point (first point of an episode)
+* Penalize larger delay, power, area
+* Reward improves when these go down relative to reference
+
+Weights:
+
+* `w_delay`
+* `w_pstatic`
+* `w_area`
+
+You control them in:
+
+* CLI flags
+* GUI spinboxes
+
+Practical weight presets:
+
+* Speed first:
+
+  * delay weight high
+  * area low
+  * power medium
+* Leakage first:
+
+  * pstatic weight high
+  * delay medium
+  * area low
+* Compact:
+
+  * area weight higher
+  * delay and power moderate
+
+## 7) Static power measurement plan
+
+For inverter:
+
+* Two DC states exist for input, low and high
+* We measure supply current in each state and compute pstatic_avg
+
+For NOR2 and above:
+
+* We must test all input combinations
+* Between each successive input vector, only one bit changes
+* That is a Gray-code style traversal
+
+Example for 2 inputs:
+
+* 00 → 01 → 11 → 10
+
+This reduces switching complexity and helps attribute static conditions cleanly.
+
+This is the next cell extension milestone.
+
+## 8) Why we enforce width minimum around 0.42 µm
+
+We observed real failures when W became too small during training.
+Example:
+
+* W dropped to 0.15 µm
+* ngspice failed with “could not find a valid modelname”
+
+So we set safe bounds:
+
+* `wn_min >= 0.42`
+* `wp_min >= 0.42`
+
+This is a practical stability guard for this setup.
+
+## 9) File-by-file explanation
+
+### `main/config.py`
+
+Purpose:
+
+* Central config for paths and tools
+* Reads environment variables, especially:
+
+  * `SKY130_LIB_SPICE`
+  * ngspice binary path if needed
+
+Typical fields:
+
+* `project_root`
+* `ngspice_bin`
+* `sky130_lib_spice`
+
+Common failure:
+
+* `SKY130_LIB_SPICE` not set or wrong path
+* Fix: export correct absolute path
+
+### `main/netlist_gen.py`
+
+Purpose:
+
+* Generate characterization netlists from parameters
+* Takes `--cell inv` and widths
+* Writes a `.cir` netlist
+
+Key details:
+
+* Avoid ngspice syntax that breaks parsing
+* Use correct `.meas` statements for tphl and tplh
+* Define tpavg as average
+
+In the robust parallel setup, we generate netlists inside worker folders through `spice_runner.py`.
+
+### `main/spice_runner.py`
+
+Purpose:
+
+* Run ngspice in batch mode for one simulation
+* Parse measures from ngspice log
+* Optionally write `.raw` waveform
+
+Key stability features we added:
+
+* Each simulation writes to a unique path
+* Uses `RUN_DIR` environment variable for run isolation
+* Worker folder is based on `pid`
+* `cwd` is set near `sky130.lib.spice` to handle relative includes
+
+Outputs per sim:
+
+* `inv_<id>.cir`
+* `inv_<id>.log`
+* `inv_<id>.raw` if enabled
+
+### `main/smoke_test.py`
+
+Purpose:
+
+* One command to validate the full chain:
+
+  * generate netlist
+  * run ngspice
+  * parse measures
+  * print results
+
+This is your first debugging tool if anything breaks.
+
+### `main/reward.py`
+
+Purpose:
+
+* Define the reward model
+* Define:
+
+  * `RewardWeights`
+  * `NormRef`
+  * `compute_reward(...)`
+
+Core idea:
+
+* reward is better when tpavg, pstatic_avg, area go down
+* weights control which trade-off the optimizer learns
+
+### `main/rl_env.py`
+
+Purpose:
+
+* Gymnasium environment for the inverter
+* Action:
+
+  * `[wn_um, wp_um]`
+* One step:
+
+  * run one simulation
+  * compute reward
+  * return terminal transition (one-step episode)
+
+Important guardrails:
+
+* Clip wn/wp to safe ranges
+* Catch ngspice failures and return a strong negative reward instead of crashing
+* Track best point seen in that environment instance
+
+### `main/optimize_inv.py`
+
+Purpose:
+
+* Main training script for overnight runs
+* Uses:
+
+  * `SubprocVecEnv` for parallel workers
+  * `spawn` multiprocessing method
+  * PPO from stable-baselines3
+
+Live monitoring outputs:
+
+* `status.json`
+* `best.json`
+* `history.csv`
+* checkpoints
+
+Also fixes SB3 warning:
+
+* batch_size chosen to divide `n_steps * n_envs` when possible
+
+### `main/gui_app.py`
+
+Purpose:
+
+* Professional GUI front end
+* Launches backend training as a subprocess
+* Monitors run files live and updates plots
+* Adds waveform plotting for best solution
+
+Why it is robust:
+
+* GUI never runs training inside the same process
+* Backend can run overnight without freezing the UI
+* Communication is file-based (status.json, best.json, history.csv)
+* This avoids fragile IPC and is easy to debug
+
+## 10) Commands cheat sheet
+
+### Setup
+
+```bash
+cd ~/stdcell_rl_poc
+uv python pin 3.12
+uv sync
+```
+
+### Install deps if needed
+
+```bash
+uv add numpy pandas pyside6 pyqtgraph stable-baselines3 gymnasium jinja2 spicelib
+uv sync
+```
+
+### Install SKY130 with ciel
+
+```bash
+uvx ciel ls-remote --pdk-family sky130
+uvx ciel enable --pdk-family sky130 <HASH>
+find ~/.ciel -type f -name "sky130.lib.spice" | head
+export SKY130_LIB_SPICE="/abs/path/to/sky130.lib.spice"
+```
+
+### Smoke test
+
+```bash
+uv run python -m main.smoke_test --wn 0.5 --wp 1.0
+uv run python -m main.smoke_test --wn 0.5 --wp 1.0 --raw
+```
+
+### Training CLI
+
+```bash
+uv run python -m main.optimize_inv --n_envs 6 --timesteps 400000 --patience 60000
+```
+
+### GUI
+
+```bash
+uv run python -m main.gui_app
+```
+
+### Watch progress without GUI
+
+```bash
+watch -n 2 "cat results/run_*/status.json | tail -n 40"
+```
+
+## 11) Troubleshooting
+
+### “No module named numpy”
+
+Cause:
+
+* Running outside uv environment
+  Fix:
+
+```bash
+uv run python -m main.gui_app
+```
+
+### “Missing measures in log”
+
+Cause:
+
+* parser regex too strict
+  Fix:
+* `_MEAS_RE` must accept trailing fields after the value
+* This is already fixed in current code
+
+### “can’t find model sky130_fd_pr__...”
+
+Cause:
+
+* SKY130 lib not included or wrong path
+  Fix:
+* ensure `SKY130_LIB_SPICE` points to a real `sky130.lib.spice`
+* ensure netlist `.lib` uses an absolute path
+
+### “could not find a valid modelname” after training starts
+
+Cause:
+
+* widths got too small for this setup
+  Fix:
+* enforce `wn_min >= 0.42` and `wp_min >= 0.42`
+* do not let the policy explore below that
+
+### Parallel collisions or weird overwrites
+
+Cause:
+
+* multiple workers writing the same netlist or log path
+  Fix:
+* use the current run isolation design:
+
+  * RUN_DIR
+  * worker_<pid>
+  * unique run_id per sim
+
+## 12) What we do next (planned)
+
+* Add NOR2 netlist generation
+* Add Gray-code input traversal for pstatic across all input combinations
+* Extend GUI cell selection:
+
+  * inv
+  * nor2
+* Add a clean “cell interface” so new cells plug in without touching the trainer
+* Add a true Pareto front extraction from sampled points, not only best snapshots
+
+## 13) Quick “overnight” recommendation
+
+If you want a safe overnight run:
+
+* Use n_envs = number of physical cores you can spare
+* Use a large timesteps cap
+* Use plateau stop patience to prevent wasting time
+
+Example:
+
+```bash
+uv run python -m main.optimize_inv --n_envs 6 --timesteps 3000000 --patience 300000
+```
+
+Then inspect:
+
+* best.json
+* waveform from GUI button
+* history.csv curves
+
+```
+
+If tu veux, je peux aussi te donner une version “README.md prêt à écrire” en une commande `cat > README.md <<'MD' ... MD` adaptée exactement à ton repo actuel, avec les noms de fichiers exacts après un `ls -R` que tu colles ici.
+::contentReference[oaicite:0]{index=0}
+```
